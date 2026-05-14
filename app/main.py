@@ -2,6 +2,19 @@ from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 import json
 
+import os
+from dotenv import load_dotenv
+load_dotenv()
+
+import psycopg2
+conn = psycopg2.connect(
+    host=os.getenv("DB_HOST"),
+    dbname=os.getenv("DB_NAME"),
+    user=os.getenv("DB_USER"),
+    password=os.getenv("DB_PASSWORD"),
+    port=os.getenv("DB_PORT"),
+)
+
 app = FastAPI()
 
 app.add_middleware(
@@ -22,18 +35,36 @@ def get_vessels(
     east: float = Query(...),
     north: float = Query(...)
 ):
-    # filter latitude
-    def in_bounds(v):
-        lat_ok = south <= v["lat"] <= north
+    cur = conn.cursor()
 
-        # handle dateline wrap
-        if west <= east:
-            lon_ok = west <= v["lon"] <= east
-        else:
-            lon_ok = v["lon"] >= west or v["lon"] <= east
+    query = """
+    SELECT id, name, type, lat, lon, heading, speed
+    FROM vessels
+    WHERE ST_Within(
+        geom,
+        ST_MakeEnvelope(%s, %s, %s, %s, 4326)
+    )
+    LIMIT 500;
+    """
 
-        return lat_ok and lon_ok
+    cur.execute(query, (west, south, east, north))
+    rows = cur.fetchall()
 
-    filtered = list(filter(in_bounds, vessels))
+    return [
+        {
+            "id": r[0],
+            "name": r[1],
+            "type": r[2],
+            "lat": r[3],
+            "lon": r[4],
+            "heading": r[5],
+            "speed": r[6],
+        }
+        for r in rows
+    ]
 
-    return filtered[:500]
+@app.on_event("startup")
+def test_db():
+    cur = conn.cursor()
+    cur.execute("select 1;")
+    print("DB connected:", cur.fetchone())
