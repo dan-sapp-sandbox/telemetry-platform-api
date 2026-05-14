@@ -1,19 +1,19 @@
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 
+import psycopg2
 import os
 from dotenv import load_dotenv
 load_dotenv()
 
-import psycopg2
 def get_conn():
-    return psycopg2.connect(
+  return psycopg2.connect(
     host=os.getenv("DB_HOST"),
     dbname=os.getenv("DB_NAME"),
     user=os.getenv("DB_USER"),
     password=os.getenv("DB_PASSWORD"),
     port=os.getenv("DB_PORT"),
-)
+  )
 
 app = FastAPI()
 
@@ -60,10 +60,3 @@ def get_vessels(
         }
         for r in rows
     ]
-
-@app.on_event("startup")
-def test_db():
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("select 1;")
-    print("DB connected:", cur.fetchone())
