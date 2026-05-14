@@ -1,6 +1,5 @@
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
-import json
 
 import os
 from dotenv import load_dotenv
@@ -24,9 +23,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-with open("app/vessels.json") as f:
-    vessels = json.load(f)
 
 @app.get("/api/vessels")
 def get_vessels(
