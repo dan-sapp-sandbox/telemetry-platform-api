@@ -3,3 +3,5 @@
 *.pyo
 *.pyd
 *.env*
+/tiles
+/data

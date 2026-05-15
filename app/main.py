@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 import psycopg2
 import os
@@ -23,6 +24,11 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+)
+app.mount(
+    "/tiles",
+    StaticFiles(directory="tiles"),
+    name="tiles"
 )
 
 @app.get("/api/vessels")
