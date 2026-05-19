@@ -13,7 +13,7 @@ def get_conn():
     port=os.getenv("DB_PORT"),
   )
 
-@app.get("/api/vessels/get-vessels")
+@app.get("/get-vessels")
 def get_vessels(
     west: float = Query(...),
     south: float = Query(...),
