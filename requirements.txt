@@ -7,3 +7,4 @@ mercantile
 pillow
 numpy
 supabase
+openai
