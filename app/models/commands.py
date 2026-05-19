@@ -7,11 +7,8 @@ class Tool(BaseModel):
     description: str
     parameters: Dict[str, str]
 
-
 class CommandRequest(BaseModel):
     prompt: str
-    tools: List[Tool]
-
 
 class CommandResponse(BaseModel):
     action: Optional[str]

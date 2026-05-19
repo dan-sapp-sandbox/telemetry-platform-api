@@ -8,6 +8,22 @@ load_dotenv()
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
+from geopy.geocoders import Nominatim
+
+geolocator = Nominatim(user_agent="sc-intelligence")
+
+
+def geocode(query: str):
+    location = geolocator.geocode(query)
+    if not location:
+        return None
+
+    return {
+        "lat": location.latitude,
+        "lon": location.longitude,
+        "display_name": location.address,
+    }
+
 
 # ------------------------------------------------------------
 # TOOL DEFINITIONS (backend-owned, not passed from frontend)
@@ -65,46 +81,33 @@ async def resolve_command(payload: CommandRequest) -> CommandResponse:
     response = client.responses.create(
         model="gpt-4.1-mini",
         input=[
-            {
-                "role": "system",
-                "content": SYSTEM_PROMPT,
-            },
-            {
-                "role": "user",
-                "content": payload.prompt,
-            },
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": payload.prompt},
         ],
         tools=TOOLS,
     )
 
-    # ------------------------------------------------------------
-    # Extract tool call safely
-    # ------------------------------------------------------------
-
-    tool_call = None
-
-    for item in response.output:
-        if getattr(item, "type", None) == "function_call":
-            tool_call = item
-            break
-
-    # ------------------------------------------------------------
-    # No tool triggered
-    # ------------------------------------------------------------
+    tool_call = next(
+        (item for item in response.output if item.type == "function_call"),
+        None
+    )
 
     if not tool_call:
         return CommandResponse(action=None, args={})
 
-    # ------------------------------------------------------------
-    # Parse arguments
-    # ------------------------------------------------------------
+    args = json.loads(tool_call.arguments)
+    query = args.get("query")
 
-    try:
-        args = json.loads(tool_call.arguments)
-    except Exception:
-        args = {}
+    geo = geocode(query)
+
+    if not geo:
+        return CommandResponse(action=None, args={})
 
     return CommandResponse(
-        action=tool_call.name,
-        args=args,
+        action="center_map",
+        args={
+            "query": query,
+            "lat": geo["lat"],
+            "lon": geo["lon"],
+        },
     )
