@@ -24,13 +24,13 @@ def get_vessels(
     cur = conn.cursor()
 
     query = """
-    SELECT id, name, type, lat, lon, heading, speed
-    FROM vessels
-    WHERE ST_Within(
-        geom,
-        ST_MakeEnvelope(%s, %s, %s, %s, 4326)
-    )
-    LIMIT 500;
+        SELECT id, name, type, lat, lon, heading, speed
+        FROM vessels
+        WHERE ST_Within(
+            geom,
+            ST_MakeEnvelope(%s, %s, %s, %s, 4326)
+        )
+        LIMIT 500;
     """
 
     cur.execute(query, (west, south, east, north))

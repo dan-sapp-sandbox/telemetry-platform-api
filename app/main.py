@@ -15,11 +15,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.mount(
-    "/tiles",
-    StaticFiles(directory="tiles"),
-    name="tiles"
-)
+# app.mount(
+#     "/tiles",
+#     StaticFiles(directory="tiles"),
+#     name="tiles"
+# )
 
 app.include_router(commands_router, prefix="/api/ai")
 app.include_router(vessels_router, prefix="/api/vessels")
