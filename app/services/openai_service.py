@@ -1,35 +1,68 @@
-import json
 from openai import OpenAI
 from app.models.commands import CommandRequest, CommandResponse
 import os
 from dotenv import load_dotenv
+import json
+
 load_dotenv()
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
+
+# ------------------------------------------------------------
+# TOOL DEFINITIONS (backend-owned, not passed from frontend)
+# ------------------------------------------------------------
+
+TOOLS = [
+    {
+        "type": "function",
+        "name": "center_map",
+        "description": (
+            "Centers the map on a geographic location such as a city, "
+            "country, region, continent, or ocean."
+        ),
+        "parameters": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "Geographic place name such as 'Paris', 'Japan', "
+                        "'Europe', 'Indian Ocean', etc."
+                    ),
+                }
+            },
+            "required": ["query"],
+        },
+    }
+]
+
+
+# ------------------------------------------------------------
+# SYSTEM PROMPT
+# ------------------------------------------------------------
+
 SYSTEM_PROMPT = """
-  You are a command router.
+You are a geospatial command router.
 
-  Pick the best matching tool from the list.
-  Only return a valid structured response.
-  If user intent matches a tool, you MUST select it.
+Your job is to convert user input into map actions.
 
-  If not execute as a normal ChatGPT query and return response
+RULES:
+- If the user mentions ANY geographic location (city, country, region, ocean, continent), use the center_map tool.
+- Do NOT answer questions.
+- Do NOT provide explanations.
+- Only return tool calls when possible.
+- If no valid location is found, return no tool call.
 """.strip()
 
-async def resolve_command(payload: CommandRequest) -> CommandResponse:
-    tools_text = "\n\n".join(
-        [
-            f"""
-                {tool.name}
-                - description: {tool.description}
-                - params: {json.dumps(tool.parameters)}
-            """.strip()
-            for tool in payload.tools
-        ]
-    )
 
-    response = client.responses.parse(
+# ------------------------------------------------------------
+# MAIN RESOLVER
+# ------------------------------------------------------------
+
+async def resolve_command(payload: CommandRequest) -> CommandResponse:
+    response = client.responses.create(
         model="gpt-4.1-mini",
         input=[
             {
@@ -38,38 +71,40 @@ async def resolve_command(payload: CommandRequest) -> CommandResponse:
             },
             {
                 "role": "user",
-                "content": f"""
-                    User request:
-                    {payload.prompt}
-
-                    Tools:
-                    {tools_text}
-                """.strip(),
+                "content": payload.prompt,
             },
         ],
-        text_format={
-            "type": "json_schema",
-            "name": "command",
-            "strict": True,
-            "schema": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "action": {
-                        "type": ["string", "null"],
-                    },
-                    "args": {
-                        "type": "object",
-                    },
-                },
-                "required": ["action", "args"],
-            },
-        },
+        tools=TOOLS,
     )
 
-    parsed = response.output_parsed
+    # ------------------------------------------------------------
+    # Extract tool call safely
+    # ------------------------------------------------------------
 
-    if not parsed:
+    tool_call = None
+
+    for item in response.output:
+        if getattr(item, "type", None) == "function_call":
+            tool_call = item
+            break
+
+    # ------------------------------------------------------------
+    # No tool triggered
+    # ------------------------------------------------------------
+
+    if not tool_call:
         return CommandResponse(action=None, args={})
 
-    return CommandResponse(**parsed)
+    # ------------------------------------------------------------
+    # Parse arguments
+    # ------------------------------------------------------------
+
+    try:
+        args = json.loads(tool_call.arguments)
+    except Exception:
+        args = {}
+
+    return CommandResponse(
+        action=tool_call.name,
+        args=args,
+    )
