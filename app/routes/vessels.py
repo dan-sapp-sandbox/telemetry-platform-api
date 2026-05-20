@@ -15,37 +15,60 @@ def get_conn():
   )
 
 @router.get("/get-vessels")
-def get_vessels(
-    west: float = Query(...),
-    south: float = Query(...),
-    east: float = Query(...),
-    north: float = Query(...)
-):
+def get_vessels():
     conn = get_conn()
     cur = conn.cursor()
 
-    query = """
-    SELECT id, name, type, lat, lon, heading, speed
-    FROM vessels
-    WHERE ST_Within(
-        geom,
-        ST_MakeEnvelope(%s, %s, %s, %s, 4326)
-    )
-    LIMIT 500;
-    """
+    try:
+        query = """
+        SELECT id, name, route_id, speed_mps, start_offset_seconds, route_offset_meters
+        FROM routed_vessels
+        LIMIT 500;
+        """
 
-    cur.execute(query, (west, south, east, north))
-    rows = cur.fetchall()
+        cur.execute(query)
+        rows = cur.fetchall()
 
-    return [
-        {
-            "id": r[0],
-            "name": r[1],
-            "type": r[2],
-            "lat": r[3],
-            "lon": r[4],
-            "heading": r[5],
-            "speed": r[6],
-        }
-        for r in rows
-    ]
+        return [
+            {
+                "id": r[0],
+                "name": r[1],
+                "routeId": r[2],
+                "speedMps": r[3],
+                "startOffsetSeconds": r[4],
+                "routeOffsetMeters": r[5],
+            }
+            for r in rows
+        ]
+
+    finally:
+        cur.close()
+        conn.close()
+
+@router.get("/get-routes")
+def get_routes():
+    conn = get_conn()
+    cur = conn.cursor()
+
+    try:
+        query = """
+        SELECT id, name, points
+        FROM routes
+        LIMIT 500;
+        """
+
+        cur.execute(query)
+        rows = cur.fetchall()
+
+        return [
+            {
+                "id": r[0],
+                "name": r[1],
+                "points": r[2],
+            }
+            for r in rows
+        ]
+
+    finally:
+        cur.close()
+        conn.close()
