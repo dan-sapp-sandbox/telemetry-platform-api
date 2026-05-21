@@ -34,8 +34,8 @@ TOOLS = [
         "type": "function",
         "name": "center_map",
         "description": (
-            "Centers the map on a geographic location such as a city, "
-            "country, region, continent, or ocean."
+            "Centers the map on a geographic location and suggests a camera altitude "
+            "appropriate for the scale of the place."
         ),
         "parameters": {
             "type": "object",
@@ -43,13 +43,17 @@ TOOLS = [
             "properties": {
                 "query": {
                     "type": "string",
+                    "description": "Place name like city, country, ocean, etc.",
+                },
+                "camera_altitude_m": {
+                    "type": "number",
                     "description": (
-                        "Geographic place name such as 'Paris', 'Japan', "
-                        "'Europe', 'Indian Ocean', etc."
+                        "Recommended camera altitude in meters. "
+                        "Represents appropriate zoom level for the place scale."
                     ),
                 }
             },
-            "required": ["query"],
+            "required": ["query", "camera_altitude_m"],
         },
     }
 ]
@@ -65,11 +69,16 @@ You are a geospatial command router.
 Your job is to convert user input into map actions.
 
 RULES:
-- If the user mentions ANY geographic location (city, country, region, ocean, continent), use the center_map tool.
+- If the user mentions ANY geographic location, use the center_map tool.
+- You MUST estimate an appropriate camera_altitude_m based on the scale of the place:
+    - small landmark / building: 500m - 5,000m
+    - city: 20,000m - 150,000m
+    - region/state: 100,000m - 500,000m
+    - country: 300,000m - 2,000,000m
+    - continent/ocean: 2,000,000m - 10,000,000m
 - Do NOT answer questions.
-- Do NOT provide explanations.
-- Only return tool calls when possible.
-- If no valid location is found, return no tool call.
+- Do NOT explain anything.
+- Only return tool calls.
 """.strip()
 
 
@@ -109,5 +118,6 @@ async def resolve_command(payload: CommandRequest) -> CommandResponse:
             "query": query,
             "lat": geo["lat"],
             "lon": geo["lon"],
+            "camera_altitude_m": args.get("camera_altitude_m"),
         },
     )
