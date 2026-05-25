@@ -39,7 +39,7 @@ def get_adsb_aircraft(
         response = requests.get(
             OPENSKY_URL,
             params=params,
-            timeout=10,
+            timeout=(5, 30),
         )
 
         response.raise_for_status()
