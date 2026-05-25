@@ -4,6 +4,7 @@ import os
 from dotenv import load_dotenv
 load_dotenv()
 import psycopg2
+import requests
 
 def get_conn():
   return psycopg2.connect(
