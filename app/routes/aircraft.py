@@ -1,4 +1,5 @@
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
+import asyncio
 router = APIRouter()
 import os
 from dotenv import load_dotenv
@@ -8,6 +9,16 @@ import json
 import glob
 from supabase import create_client
 from pathlib import Path
+import psycopg2
+
+def get_conn():
+  return psycopg2.connect(
+    host=os.getenv("DB_HOST"),
+    dbname=os.getenv("DB_NAME"),
+    user=os.getenv("DB_USER"),
+    password=os.getenv("DB_PASSWORD"),
+    port=os.getenv("DB_PORT"),
+  )
 
 supabase = create_client(
     os.getenv("SUPABASE_URL"),
@@ -119,3 +130,175 @@ def ingest_opensky():
         "files_processed": len(files),
         "rows_inserted": total
     }
+
+@router.websocket("/ws/aircraft")
+async def aircraft_ws(websocket: WebSocket):
+    await websocket.accept()
+
+    conn = None
+    cur = None
+
+    bounds = None
+    bounds_version = 0
+    last_bounds_version_sent = -1
+
+    current_time = None
+    last_snapshot = None
+
+    SIM_SPEED = 1.0
+    TICK = 0.5
+
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+
+        # -------------------------------------------------
+        # INIT TIME
+        # -------------------------------------------------
+        cur.execute("""
+            SELECT MIN(snapshot_time)
+            FROM aircraft_positions
+        """)
+        current_time = cur.fetchone()[0]
+
+        if not current_time:
+            return
+
+        # -------------------------------------------------
+        # RECEIVER (bounds updates)
+        # -------------------------------------------------
+        async def receiver():
+            nonlocal bounds, bounds_version
+
+            while True:
+                data = await websocket.receive_json()
+                bounds = data
+                bounds_version += 1
+
+                print("[RECV] bounds updated:", data)
+
+        # -------------------------------------------------
+        # STREAMER
+        # -------------------------------------------------
+        async def streamer():
+            nonlocal current_time, last_snapshot, last_bounds_version_sent
+
+            while True:
+                await asyncio.sleep(TICK)
+
+                if not bounds:
+                    continue
+
+                west = bounds["west"]
+                east = bounds["east"]
+                south = bounds["south"]
+                north = bounds["north"]
+
+                # -------------------------------------------------
+                # advance simulation time
+                # -------------------------------------------------
+                current_time += SIM_SPEED * TICK
+
+                # -------------------------------------------------
+                # find NEXT snapshot in DB
+                # -------------------------------------------------
+                cur.execute("""
+                    SELECT MIN(snapshot_time)
+                    FROM aircraft_positions
+                    WHERE snapshot_time > %s
+                """, (current_time,))
+
+                next_snapshot = cur.fetchone()[0]
+
+                # -------------------------------------------------
+                # FIX: define missing variable properly
+                # -------------------------------------------------
+                bounds_changed = (bounds_version != last_bounds_version_sent)
+
+                snapshot_changed = (
+                    next_snapshot is not None
+                    and (last_snapshot is None or next_snapshot != last_snapshot)
+                )
+
+                # -------------------------------------------------
+                # send rules
+                # -------------------------------------------------
+                should_send = (
+                    last_snapshot is None
+                    or bounds_changed
+                    or snapshot_changed
+                )
+
+                if not should_send:
+                    continue
+
+                last_bounds_version_sent = bounds_version
+                last_snapshot = next_snapshot
+
+                # -------------------------------------------------
+                # fetch aircraft at current simulation time
+                # -------------------------------------------------
+                query = """
+                WITH latest AS (
+                    SELECT DISTINCT ON (icao)
+                        icao,
+                        callsign,
+                        origin_country,
+                        lon,
+                        lat,
+                        altitude_m,
+                        velocity_mps,
+                        heading_deg,
+                        vertical_rate,
+                        on_ground,
+                        snapshot_time
+                    FROM aircraft_positions
+                    WHERE snapshot_time <= %s
+                    ORDER BY icao, snapshot_time DESC
+                )
+                SELECT *
+                FROM latest
+                WHERE lon BETWEEN %s AND %s
+                  AND lat BETWEEN %s AND %s
+                LIMIT 1000;
+                """
+
+                cur.execute(query, (
+                    current_time,
+                    west, east, south, north
+                ))
+
+                rows = cur.fetchall()
+
+                aircraft = [
+                    {
+                        "icao": r[0],
+                        "callsign": r[1],
+                        "origin_country": r[2],
+                        "lon": r[3],
+                        "lat": r[4],
+                        "altitude_m": r[5],
+                        "velocity_mps": r[6],
+                        "heading_deg": r[7],
+                        "vertical_rate": r[8],
+                        "on_ground": r[9],
+                        "snapshot_time": r[10],
+                    }
+                    for r in rows
+                ]
+
+                await websocket.send_json(aircraft)
+
+        await asyncio.gather(receiver(), streamer())
+
+    except WebSocketDisconnect:
+        print("[WS] disconnected")
+
+    except Exception as e:
+        print("[WS ERROR]", e)
+
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
