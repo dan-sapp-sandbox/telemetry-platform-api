@@ -224,9 +224,8 @@ async def aircraft_ws(websocket: WebSocket):
                 # send rules
                 # -------------------------------------------------
                 should_send = (
-                    last_snapshot is None
-                    or bounds_changed
-                    or snapshot_changed
+                    bounds_changed
+                    or (next_snapshot is not None and next_snapshot != last_snapshot)
                 )
 
                 if not should_send:
