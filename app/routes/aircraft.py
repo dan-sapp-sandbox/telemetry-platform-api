@@ -25,42 +25,6 @@ supabase = create_client(
     os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 )
 
-@router.get("/get-aircraft")
-def get_aircraft(
-    lon_min: float = Query(...),
-    lon_max: float = Query(...),
-    lat_min: float = Query(...),
-    lat_max: float = Query(...)
-):
-    try:
-        # 1. Pull recent data (important for performance)
-        res = supabase.table("aircraft_positions") \
-            .select("*") \
-            .gte("lon", lon_min) \
-            .lte("lon", lon_max) \
-            .gte("lat", lat_min) \
-            .lte("lat", lat_max) \
-            .order("snapshot_time", desc=True) \
-            .limit(10000) \
-            .execute()
-
-        rows = res.data
-
-        # 2. Keep only latest record per aircraft
-        latest = {}
-
-        for r in rows:
-            icao = r["icao"]
-
-            # first hit is newest because of desc order
-            if icao not in latest:
-                latest[icao] = r
-
-        return list(latest.values())
-
-    except Exception as e:
-        return {"error": str(e)}
-
 def transform_state(snapshot_time, s):
     return {
         "snapshot_time": snapshot_time,
