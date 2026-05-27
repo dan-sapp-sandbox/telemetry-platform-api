@@ -190,6 +190,7 @@ async def aircraft_ws(websocket: WebSocket):
                     SELECT MIN(snapshot_time)
                     FROM aircraft_positions
                     WHERE snapshot_time > %s
+                    AND (velocity_mps > 5)
                 """, (current_time,))
 
                 next_snapshot = cur.fetchone()[0]

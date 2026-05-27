@@ -170,7 +170,7 @@ async def ais_ws(websocket: WebSocket):
                 FROM latest
                 WHERE lon BETWEEN %s AND %s
                   AND lat BETWEEN %s AND %s
-                  AND (sog IS NULL OR sog > 0.5)
+                  AND (sog > 0.5)
                 LIMIT 3000;
                 """
 
