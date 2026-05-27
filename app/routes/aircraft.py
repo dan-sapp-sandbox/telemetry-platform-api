@@ -169,7 +169,6 @@ async def aircraft_ws(websocket: WebSocket):
                 bounds = data
                 bounds_version += 1
 
-
         async def streamer():
             nonlocal current_time, last_snapshot, last_bounds_version_sent
 
@@ -190,7 +189,6 @@ async def aircraft_ws(websocket: WebSocket):
                     SELECT MIN(snapshot_time)
                     FROM aircraft_positions
                     WHERE snapshot_time > %s
-                    AND (velocity_mps > 5)
                 """, (current_time,))
 
                 next_snapshot = cur.fetchone()[0]
@@ -235,6 +233,8 @@ async def aircraft_ws(websocket: WebSocket):
                 FROM latest
                 WHERE lon BETWEEN %s AND %s
                   AND lat BETWEEN %s AND %s
+                  AND COALESCE(on_ground, FALSE) = FALSE
+                  AND COALESCE(velocity_mps, 0) > 1
                 LIMIT 1000;
                 """
 
