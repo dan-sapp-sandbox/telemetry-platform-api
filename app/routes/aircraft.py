@@ -152,9 +152,6 @@ async def aircraft_ws(websocket: WebSocket):
         conn = get_conn()
         cur = conn.cursor()
 
-        # -------------------------------------------------
-        # INIT TIME
-        # -------------------------------------------------
         cur.execute("""
             SELECT MIN(snapshot_time)
             FROM aircraft_positions
@@ -164,9 +161,6 @@ async def aircraft_ws(websocket: WebSocket):
         if not current_time:
             return
 
-        # -------------------------------------------------
-        # RECEIVER (bounds updates)
-        # -------------------------------------------------
         async def receiver():
             nonlocal bounds, bounds_version
 
@@ -175,11 +169,7 @@ async def aircraft_ws(websocket: WebSocket):
                 bounds = data
                 bounds_version += 1
 
-                print("[RECV] bounds updated:", data)
 
-        # -------------------------------------------------
-        # STREAMER
-        # -------------------------------------------------
         async def streamer():
             nonlocal current_time, last_snapshot, last_bounds_version_sent
 
@@ -194,14 +184,8 @@ async def aircraft_ws(websocket: WebSocket):
                 south = bounds["south"]
                 north = bounds["north"]
 
-                # -------------------------------------------------
-                # advance simulation time
-                # -------------------------------------------------
                 current_time += SIM_SPEED * TICK
 
-                # -------------------------------------------------
-                # find NEXT snapshot in DB
-                # -------------------------------------------------
                 cur.execute("""
                     SELECT MIN(snapshot_time)
                     FROM aircraft_positions
@@ -210,9 +194,6 @@ async def aircraft_ws(websocket: WebSocket):
 
                 next_snapshot = cur.fetchone()[0]
 
-                # -------------------------------------------------
-                # FIX: define missing variable properly
-                # -------------------------------------------------
                 bounds_changed = (bounds_version != last_bounds_version_sent)
 
                 snapshot_changed = (
@@ -220,9 +201,6 @@ async def aircraft_ws(websocket: WebSocket):
                     and (last_snapshot is None or next_snapshot != last_snapshot)
                 )
 
-                # -------------------------------------------------
-                # send rules
-                # -------------------------------------------------
                 should_send = (
                     bounds_changed
                     or (next_snapshot is not None and next_snapshot != last_snapshot)
@@ -234,9 +212,6 @@ async def aircraft_ws(websocket: WebSocket):
                 last_bounds_version_sent = bounds_version
                 last_snapshot = next_snapshot
 
-                # -------------------------------------------------
-                # fetch aircraft at current simulation time
-                # -------------------------------------------------
                 query = """
                 WITH latest AS (
                     SELECT DISTINCT ON (icao)
