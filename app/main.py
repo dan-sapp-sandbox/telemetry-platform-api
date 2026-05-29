@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.routes.commands import router as commands_router
 from app.routes.vessels import router as vessels_router
 from app.routes.aircraft import router as aircraft_router
+from app.routes.weather import router as weather_router
 
 app = FastAPI()
 
@@ -16,12 +17,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# app.mount(
-#     "/tiles",
-#     StaticFiles(directory="tiles"),
-#     name="tiles"
-# )
-
 app.include_router(commands_router, prefix="/api/ai")
 app.include_router(vessels_router, prefix="/api/vessels")
 app.include_router(aircraft_router, prefix="/api/aircraft")
+app.include_router(weather_router, prefix="/api/weather")

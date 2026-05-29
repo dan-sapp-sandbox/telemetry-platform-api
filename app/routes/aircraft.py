@@ -10,6 +10,7 @@ import glob
 from supabase import create_client
 from pathlib import Path
 import psycopg2
+from datetime import timedelta
 
 def get_conn():
   return psycopg2.connect(
@@ -103,108 +104,76 @@ async def aircraft_ws(websocket: WebSocket):
     cur = None
 
     bounds = None
-    bounds_version = 0
-    last_bounds_version_sent = -1
 
-    current_time = None
-    last_snapshot = None
-
-    SIM_SPEED = 1.0
-    TICK = 0.5
+    CHUNK_SECONDS = 120
+    APPEND_THRESHOLD = 30
 
     try:
         conn = get_conn()
         cur = conn.cursor()
 
+        # BIGINT epoch start
         cur.execute("""
             SELECT MIN(snapshot_time)
-            FROM aircraft_positions
+            FROM adsb_playback
         """)
-        current_time = cur.fetchone()[0]
+        playback_time = cur.fetchone()[0]
 
-        if not current_time:
+        if playback_time is None:
+            await websocket.close()
             return
 
         async def receiver():
-            nonlocal bounds, bounds_version
-
+            nonlocal bounds
             while True:
-                data = await websocket.receive_json()
-                bounds = data
-                bounds_version += 1
+                bounds = await websocket.receive_json()
 
         async def streamer():
-            nonlocal current_time, last_snapshot, last_bounds_version_sent
+            nonlocal playback_time
+
+            last_sent_end = playback_time
 
             while True:
-                await asyncio.sleep(TICK)
+                await asyncio.sleep(1)
 
                 if not bounds:
                     continue
+
+                # ensure we stay ahead of playback window
+                if last_sent_end - playback_time > APPEND_THRESHOLD:
+                    continue
+
+                chunk_end = last_sent_end + CHUNK_SECONDS
 
                 west = bounds["west"]
                 east = bounds["east"]
                 south = bounds["south"]
                 north = bounds["north"]
 
-                current_time += SIM_SPEED * TICK
-
-                cur.execute("""
-                    SELECT MIN(snapshot_time)
-                    FROM aircraft_positions
-                    WHERE snapshot_time > %s
-                """, (current_time,))
-
-                next_snapshot = cur.fetchone()[0]
-
-                bounds_changed = (bounds_version != last_bounds_version_sent)
-
-                snapshot_changed = (
-                    next_snapshot is not None
-                    and (last_snapshot is None or next_snapshot != last_snapshot)
-                )
-
-                should_send = (
-                    bounds_changed
-                    or (next_snapshot is not None and next_snapshot != last_snapshot)
-                )
-
-                if not should_send:
-                    continue
-
-                last_bounds_version_sent = bounds_version
-                last_snapshot = next_snapshot
-
+                # FIXED SQL (removed trailing comma + fixed schema alignment)
                 query = """
-                WITH latest AS (
-                    SELECT DISTINCT ON (icao)
-                        icao,
-                        callsign,
-                        origin_country,
-                        lon,
-                        lat,
-                        altitude_m,
-                        velocity_mps,
-                        heading_deg,
-                        vertical_rate,
-                        on_ground,
-                        snapshot_time
-                    FROM aircraft_positions
-                    WHERE snapshot_time <= %s
-                    ORDER BY icao, snapshot_time DESC
-                )
-                SELECT *
-                FROM latest
-                WHERE lon BETWEEN %s AND %s
+                SELECT
+                    icao,
+                    snapshot_time,
+                    lat,
+                    lon,
+                    altitude_m,
+                    velocity_mps,
+                    heading_deg,
+                    callsign,
+                    origin_country
+                FROM adsb_playback
+                WHERE snapshot_time BETWEEN %s AND %s
+                  AND lon BETWEEN %s AND %s
                   AND lat BETWEEN %s AND %s
-                  AND COALESCE(on_ground, FALSE) = FALSE
-                  AND COALESCE(velocity_mps, 0) > 1
-                LIMIT 1000;
+                ORDER BY snapshot_time ASC
                 """
 
                 cur.execute(query, (
-                    current_time,
-                    west, east, south, north
+                    last_sent_end,
+                    chunk_end,
+                    west, east,
+                    south, north
                 ))
 
                 rows = cur.fetchall()
@@ -212,29 +181,31 @@ async def aircraft_ws(websocket: WebSocket):
                 aircraft = [
                     {
                         "icao": r[0],
-                        "callsign": r[1],
-                        "origin_country": r[2],
+                        "snapshot_time": r[1],
+                        "lat": r[2],
                         "lon": r[3],
-                        "lat": r[4],
-                        "altitude_m": r[5],
-                        "velocity_mps": r[6],
-                        "heading_deg": r[7],
-                        "vertical_rate": r[8],
-                        "on_ground": r[9],
-                        "snapshot_time": r[10],
+                        "altitude_m": r[4],
+                        "velocity_mps": r[5],
+                        "heading_deg": r[6],
+                        "callsign": r[7],
+                        "origin_country": r[8],
                     }
                     for r in rows
                 ]
 
-                await websocket.send_json(aircraft)
+                await websocket.send_json({
+                    "type": "append",
+                    "start_time": last_sent_end,
+                    "end_time": chunk_end,
+                    "aircraft": aircraft
+                })
+
+                last_sent_end = chunk_end
 
         await asyncio.gather(receiver(), streamer())
 
     except WebSocketDisconnect:
         print("[WS] disconnected")
-
-    except Exception as e:
-        print("[WS ERROR]", e)
 
     finally:
         if cur:

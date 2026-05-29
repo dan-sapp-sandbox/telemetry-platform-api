@@ -9,3 +9,4 @@ numpy
 supabase
 openai
 geopy
+aiohttp
