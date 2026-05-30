@@ -84,128 +84,142 @@ async def ais_ws(websocket: WebSocket):
     cur = None
 
     bounds = None
-    bounds_version = 0
 
-    current_time = None
+    WINDOW_MS = 30_000
+    INIT_WINDOW_MS = 5 * 60 * 1000
 
-    SIM_SPEED = 1.0
-    TICK_MS = 1000  # 1 second simulation step
-
-    BATCH_MS = 15_000
-    last_sent_window = None
+    last_sent_time = None
 
     try:
         conn = get_conn()
         cur = conn.cursor()
 
-        # start at earliest AIS timestamp
+        print("[AIS WS] started")
+
+        # start time
         cur.execute("""
             SELECT MIN(timestamp_ms)
             FROM ais_position_reports
         """)
-        current_time = cur.fetchone()[0]
+        start_time = cur.fetchone()[0]
 
-        if not current_time:
+        if not start_time:
+            print("[AIS WS] no data")
             return
 
-        # align to batch boundary
-        current_time = (current_time // BATCH_MS) * BATCH_MS
-
-        # 🔥 IMPORTANT FIX: prime forward so first send isn't empty
-        current_time += TICK_MS
+        start_time = (start_time // WINDOW_MS) * WINDOW_MS
 
         async def receiver():
-            nonlocal bounds, bounds_version
+            nonlocal bounds
+
+            print("[AIS WS] receiver started")
 
             while True:
-                data = await websocket.receive_json()
-                bounds = data
-                bounds_version += 1
+                bounds = await websocket.receive_json()
+                print(f"[AIS WS] bounds updated: {bounds}")
+
+        async def send_window(start_ms, end_ms, label):
+            west = bounds["west"]
+            east = bounds["east"]
+            south = bounds["south"]
+            north = bounds["north"]
+
+            print(f"[AIS WS] {label}: {start_ms} → {end_ms}")
+
+            query = """
+            WITH latest AS (
+                SELECT DISTINCT ON (mmsi)
+                    mmsi,
+                    ship_name,
+                    lon,
+                    lat,
+                    sog,
+                    cog,
+                    heading,
+                    nav_status,
+                    rot,
+                    timestamp_ms
+                FROM ais_position_reports
+                WHERE timestamp_ms <= %s
+                ORDER BY mmsi, timestamp_ms DESC
+            )
+            SELECT *
+            FROM latest
+            WHERE lon BETWEEN %s AND %s
+              AND lat BETWEEN %s AND %s
+            LIMIT 1000;
+            """
+
+            cur.execute(query, (
+                end_ms,
+                west, east,
+                south, north
+            ))
+
+            rows = cur.fetchall()
+
+            print(f"[AIS WS] rows ({label}) = {len(rows)}")
+
+            vessels = [
+                {
+                    "mmsi": r[0],
+                    "ship_name": r[1],
+                    "lon": r[2],
+                    "lat": r[3],
+                    "sog": r[4],
+                    "cog": r[5],
+                    "heading": r[6],
+                    "nav_status": r[7],
+                    "rot": r[8],
+                    "timestamp_ms": r[9],
+                }
+                for r in rows
+            ]
+
+            await websocket.send_json({
+                "type": label,
+                "start": start_ms,
+                "end": end_ms,
+                "vessels": vessels
+            })
 
         async def streamer():
-            nonlocal current_time, last_sent_window
+            nonlocal last_sent_time
 
+            print("[AIS WS] streamer started")
+
+            # wait for bounds first
+            while not bounds:
+                await asyncio.sleep(0.1)
+
+            print("[AIS WS] initial bounds locked")
+
+            # INIT: 5 minute chunk
+            last_sent_time = start_time
+
+            init_end = last_sent_time + INIT_WINDOW_MS
+
+            await send_window(last_sent_time, init_end, "INIT")
+
+            last_sent_time = init_end
+
+            # LOOP: 30 second chunks
             while True:
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(30)
 
                 if not bounds:
                     continue
 
-                west = bounds["west"]
-                east = bounds["east"]
-                south = bounds["south"]
-                north = bounds["north"]
+                next_end = last_sent_time + WINDOW_MS
 
-                # advance simulation
-                current_time += SIM_SPEED * TICK_MS
+                await send_window(last_sent_time, next_end, "APPEND")
 
-                window = current_time // BATCH_MS
-
-                # only emit once per 15s bucket
-                if window == last_sent_window:
-                    continue
-
-                last_sent_window = window
-
-                window_time = window * BATCH_MS
-
-                query = """
-                WITH latest AS (
-                    SELECT DISTINCT ON (mmsi)
-                        mmsi,
-                        ship_name,
-                        lon,
-                        lat,
-                        sog,
-                        cog,
-                        heading,
-                        nav_status,
-                        rot,
-                        timestamp_ms
-                    FROM ais_position_reports
-                    WHERE timestamp_ms <= %s
-                    ORDER BY mmsi, timestamp_ms DESC
-                )
-                SELECT *
-                FROM latest
-                WHERE lon BETWEEN %s AND %s
-                  AND lat BETWEEN %s AND %s
-                  AND (sog > 0.5)
-                LIMIT 3000;
-                """
-
-                cur.execute(query, (
-                    window_time,
-                    west, east, south, north
-                ))
-
-                rows = cur.fetchall()
-
-                vessels = [
-                    {
-                        "mmsi": r[0],
-                        "ship_name": r[1],
-                        "lon": r[2],
-                        "lat": r[3],
-                        "sog": r[4],
-                        "cog": r[5],
-                        "heading": r[6],
-                        "nav_status": r[7],
-                        "rot": r[8],
-                        "timestamp_ms": r[9],
-                    }
-                    for r in rows
-                ]
-
-                await websocket.send_json(vessels)
+                last_sent_time = next_end
 
         await asyncio.gather(receiver(), streamer())
 
     except WebSocketDisconnect:
-        print("[WS] AIS disconnected")
-
-    except Exception as e:
-        print("[WS ERROR]", e)
+        print("[AIS WS] disconnected")
 
     finally:
         if cur:

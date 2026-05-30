@@ -3,7 +3,10 @@ import mercantile
 import rasterio
 import numpy as np
 
-from rasterio.windows import from_bounds
+from rasterio.enums import Resampling
+from rasterio.transform import from_bounds
+from rasterio.warp import reproject
+
 from PIL import Image
 
 RASTER_PATH = "data/worldpop.tif"
@@ -14,10 +17,61 @@ TILE_SIZE = 256
 MIN_ZOOM = 0
 MAX_ZOOM = 5
 
+WEB_MERCATOR = "EPSG:3857"
+
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
+def heatmap_gradient(v):
+
+    rgba = np.zeros((v.shape[0], v.shape[1], 4), dtype=np.uint8)
+
+    vf = v.astype(np.float32) / 255.0
+    vf = np.power(vf, 0.55)
+
+    vv = (vf * 255).astype(np.uint8)
+
+    r = np.zeros_like(vv)
+    g = np.zeros_like(vv)
+    b = np.zeros_like(vv)
+
+    m1 = vv < 50
+    b[m1] = 80 + vv[m1] * 2
+
+    m2 = (vv >= 50) & (vv < 100)
+    g[m2] = vv[m2] * 2
+    b[m2] = 255
+
+    m3 = (vv >= 100) & (vv < 150)
+    r[m3] = (vv[m3] - 100) * 5
+    g[m3] = 255
+    b[m3] = 255 - (vv[m3] - 100) * 3
+
+    m4 = (vv >= 150) & (vv < 200)
+    r[m4] = 255
+    g[m4] = 255 - (vv[m4] - 150) * 3
+
+    m5 = vv >= 200
+    r[m5] = 255
+    g[m5] = np.clip(
+        255 - ((vv[m5] - 200) * 1.5),
+        0,
+        255
+    ).astype(np.uint8)
+
+    alpha = (vf * 255 * 0.9).astype(np.uint8)
+
+    rgba[..., 0] = r
+    rgba[..., 1] = g
+    rgba[..., 2] = b
+    rgba[..., 3] = alpha
+
+    return rgba
+
+
 with rasterio.open(RASTER_PATH) as src:
+
+    dataset_max = 5000.0
 
     for z in range(MIN_ZOOM, MAX_ZOOM + 1):
 
@@ -25,70 +79,48 @@ with rasterio.open(RASTER_PATH) as src:
 
         for tile in mercantile.tiles(-180, -85, 180, 85, z):
 
-            bounds = mercantile.bounds(tile)
-
             try:
-                window = from_bounds(
-                    bounds.west,
-                    bounds.south,
-                    bounds.east,
-                    bounds.north,
-                    src.transform
+
+                bounds = mercantile.xy_bounds(tile)
+
+                dst_transform = from_bounds(
+                    bounds.left,
+                    bounds.bottom,
+                    bounds.right,
+                    bounds.top,
+                    TILE_SIZE,
+                    TILE_SIZE
                 )
 
-                data = src.read(
-                    1,
-                    window=window,
-                    out_shape=(TILE_SIZE, TILE_SIZE),
-                    resampling=rasterio.enums.Resampling.average
+                destination = np.zeros(
+                    (TILE_SIZE, TILE_SIZE),
+                    dtype=np.float32
                 )
 
-                # --- CLEANUP / NORMALIZATION ---
-                data = np.nan_to_num(data)
+                reproject(
+                    source=rasterio.band(src, 1),
+                    destination=destination,
+
+                    src_transform=src.transform,
+                    src_crs=src.crs,
+
+                    dst_transform=dst_transform,
+                    dst_crs=WEB_MERCATOR,
+
+                    resampling=Resampling.bilinear
+                )
+
+                data = np.nan_to_num(destination)
                 data[data < 0] = 0
 
-                data = np.log1p(data)
+                data = np.clip(data, 0, dataset_max)
 
-                if data.max() > 0:
-                    data = data / data.max()
+                data = np.log1p(data)
+                data /= np.log1p(dataset_max)
 
                 data = (data * 255).astype(np.uint8)
 
-                # --- IMAGE BUFFER ---
-                rgba = np.zeros((TILE_SIZE, TILE_SIZE, 4), dtype=np.uint8)
-
-                # --- COLOR RAMP ---
-                for i in range(TILE_SIZE):
-                    for j in range(TILE_SIZE):
-
-                        v = data[i, j]
-
-                        if v <= 0:
-                            continue
-
-                        # gamma correction
-                        v = (v / 255.0) ** 0.55
-                        v = int(v * 255)
-
-                        # heatmap gradient
-                        if v < 50:
-                            r, g, b = 0, 0, 80 + v * 2
-
-                        elif v < 100:
-                            r, g, b = 0, v * 2, 255
-
-                        elif v < 150:
-                            r, g, b = (v - 100) * 5, 255, 255 - (v - 100) * 3
-
-                        elif v < 200:
-                            r, g, b = 255, 255 - (v - 150) * 3, 0
-
-                        else:
-                            r, g, b = 255, int(255 - (v - 200) * 1.5), 0
-
-                        a = int(v * 0.9)
-
-                        rgba[i, j] = [r, g, b, a]
+                rgba = heatmap_gradient(data)
 
                 img = Image.fromarray(rgba, mode="RGBA")
 
@@ -100,7 +132,10 @@ with rasterio.open(RASTER_PATH) as src:
 
                 os.makedirs(tile_dir, exist_ok=True)
 
-                tile_path = os.path.join(tile_dir, f"{tile.y}.png")
+                tile_path = os.path.join(
+                    tile_dir,
+                    f"{tile.y}.png"
+                )
 
                 img.save(tile_path)
 

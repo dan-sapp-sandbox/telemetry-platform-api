@@ -17,8 +17,8 @@ supabase = create_client(
 )
 
 BUCKET = "tiles"
-BASE_DIR = "tiles/weather/current"
-# BASE_DIR = "tiles/population"
+# BASE_DIR = "tiles/weather/current"
+BASE_DIR = "tiles/population"
 
 def upload_file(local_path, remote_path, retries=3):
     for i in range(retries):
@@ -59,8 +59,8 @@ for z in os.listdir(BASE_DIR):
 
             local_path = os.path.join(x_path, y_file)
 
-            # remote_path = f"population/{z}/{x}/{y_file}"
-            remote_path = f"weather/current/{z}/{x}/{y_file}"
+            remote_path = f"population/{z}/{x}/{y_file}"
+            # remote_path = f"weather/current/{z}/{x}/{y_file}"
 
             print("uploading", remote_path)
 
