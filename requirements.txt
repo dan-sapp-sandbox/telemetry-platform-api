@@ -10,3 +10,4 @@ supabase
 openai
 geopy
 aiohttp
+requests
