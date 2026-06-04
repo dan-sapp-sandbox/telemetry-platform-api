@@ -4,7 +4,6 @@ router = APIRouter()
 import os
 from dotenv import load_dotenv
 load_dotenv()
-import requests
 import json
 import glob
 from supabase import create_client
