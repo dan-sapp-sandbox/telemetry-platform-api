@@ -87,7 +87,6 @@ async def ais_ws(websocket: WebSocket):
 
     CHUNK_MS = 30_000
     INIT_WINDOW_MS = 5 * 60 * 1000
-    APPEND_THRESHOLD = 120_000
 
     try:
         conn = get_conn()
@@ -95,50 +94,11 @@ async def ais_ws(websocket: WebSocket):
 
         print("[AIS WS] started")
 
-        cur.execute("""
-            SELECT MIN(timestamp_ms)
-            FROM ais_position_reports
-        """)
-        playback_time = cur.fetchone()[0]
-
-        if playback_time is None:
-            await websocket.close()
-            return
-
-        playback_time = (playback_time // CHUNK_MS) * CHUNK_MS
-
         async def receiver():
             nonlocal bounds
+
             while True:
                 bounds = await websocket.receive_json()
-
-        async def streamer():
-            nonlocal playback_time
-
-            last_sent_end = playback_time
-
-            while not bounds:
-                await asyncio.sleep(0.1)
-
-            init_end = last_sent_end + INIT_WINDOW_MS
-
-            await send_chunk(last_sent_end, init_end, "INIT")
-            last_sent_end = init_end
-
-            while True:
-                await asyncio.sleep(1)
-
-                if not bounds:
-                    continue
-
-                if last_sent_end - playback_time > APPEND_THRESHOLD:
-                    continue
-
-                chunk_end = last_sent_end + CHUNK_MS
-
-                await send_chunk(last_sent_end, chunk_end, "APPEND")
-
-                last_sent_end = chunk_end
 
         async def send_chunk(start_ms, end_ms, label):
             west = bounds["west"]
@@ -165,12 +125,17 @@ async def ais_ws(websocket: WebSocket):
             ORDER BY mmsi, timestamp_ms ASC
             """
 
-            cur.execute(query, (
-                start_ms,
-                end_ms,
-                west, east,
-                south, north
-            ))
+            cur.execute(
+                query,
+                (
+                    start_ms,
+                    end_ms,
+                    west,
+                    east,
+                    south,
+                    north,
+                ),
+            )
 
             rows = cur.fetchall()
 
@@ -182,32 +147,94 @@ async def ais_ws(websocket: WebSocket):
                 if mmsi not in by_mmsi:
                     by_mmsi[mmsi] = []
 
-                by_mmsi[mmsi].append({
-                    "mmsi": r[0],
-                    "timestamp_ms": r[1],
-                    "lat": r[2],
-                    "lon": r[3],
-                    "sog": r[4],
-                    "cog": r[5],
-                    "heading": r[6],
-                    "ship_name": r[7],
-                    "nav_status": r[8],
-                    "rot": r[9],
-                })
+                by_mmsi[mmsi].append(
+                    {
+                        "mmsi": r[0],
+                        "timestamp_ms": r[1],
+                        "lat": r[2],
+                        "lon": r[3],
+                        "sog": r[4],
+                        "cog": r[5],
+                        "heading": r[6],
+                        "ship_name": r[7],
+                        "nav_status": r[8],
+                        "rot": r[9],
+                    }
+                )
 
-            await websocket.send_json({
-                "type": label.lower(),
-                "start_time": start_ms,
-                "end_time": end_ms,
-                "snapshots": by_mmsi
-            })
+            await websocket.send_json(
+                {
+                    "type": label.lower(),
+                    "start_time": start_ms,
+                    "end_time": end_ms,
+                    "snapshots": by_mmsi,
+                }
+            )
 
             print(
-                f"[AIS WS] {label}: vessels={len(by_mmsi)} "
+                f"[AIS WS] {label}: "
+                f"vessels={len(by_mmsi)} "
                 f"total_points={len(rows)}"
             )
 
-        await asyncio.gather(receiver(), streamer())
+        async def streamer():
+            nonlocal bounds
+
+            while not bounds:
+                await asyncio.sleep(0.1)
+
+            cur.execute("""
+                SELECT
+                    MIN(timestamp_ms),
+                    MAX(timestamp_ms)
+                FROM ais_position_reports
+            """)
+
+            first_timestamp, max_timestamp = cur.fetchone()
+
+            if first_timestamp is None:
+                print("[AIS WS] no AIS data")
+                return
+
+            first_timestamp = (
+                first_timestamp // CHUNK_MS
+            ) * CHUNK_MS
+
+            init_end = min(
+                first_timestamp + INIT_WINDOW_MS,
+                max_timestamp,
+            )
+
+            await send_chunk(
+                first_timestamp,
+                init_end,
+                "INIT",
+            )
+
+            last_sent_end = init_end
+
+            while last_sent_end < max_timestamp:
+                await asyncio.sleep(CHUNK_MS / 1000)
+
+                chunk_end = min(
+                    last_sent_end + CHUNK_MS,
+                    max_timestamp,
+                )
+
+                await send_chunk(
+                    last_sent_end,
+                    chunk_end,
+                    "APPEND",
+                )
+
+                last_sent_end = chunk_end
+
+            print("[AIS WS] reached end of dataset")
+
+        await asyncio.gather(
+            receiver(),
+            streamer(),
+        )
 
     except WebSocketDisconnect:
         print("[AIS WS] disconnected")
@@ -215,5 +242,6 @@ async def ais_ws(websocket: WebSocket):
     finally:
         if cur:
             cur.close()
+
         if conn:
             conn.close()
