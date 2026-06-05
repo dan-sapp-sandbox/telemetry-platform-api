@@ -101,56 +101,23 @@ async def aircraft_ws(websocket: WebSocket):
 
     conn = None
     cur = None
-
     bounds = None
 
-    CHUNK_SECONDS = 120
-    APPEND_THRESHOLD = 30
+    INIT_WINDOW_SECONDS = 120
 
     try:
         conn = get_conn()
         cur = conn.cursor()
 
-        # BIGINT epoch start
-        cur.execute("""
-            SELECT MIN(snapshot_time)
-            FROM adsb_playback
-        """)
-        playback_time = cur.fetchone()[0]
-
-        if playback_time is None:
-            await websocket.close()
-            return
+        print("[AIRCRAFT WS] started")
 
         async def receiver():
             nonlocal bounds
             while True:
                 bounds = await websocket.receive_json()
 
-        async def streamer():
-            nonlocal playback_time
-
-            last_sent_end = playback_time
-
-            while True:
-                await asyncio.sleep(1)
-
-                if not bounds:
-                    continue
-
-                # ensure we stay ahead of playback window
-                if last_sent_end - playback_time > APPEND_THRESHOLD:
-                    continue
-
-                chunk_end = last_sent_end + CHUNK_SECONDS
-
-                west = bounds["west"]
-                east = bounds["east"]
-                south = bounds["south"]
-                north = bounds["north"]
-
-                # FIXED SQL (removed trailing comma + fixed schema alignment)
-                query = """
+        async def send_chunk(start_t, end_t, label):
+            cur.execute("""
                 SELECT
                     icao,
                     snapshot_time,
@@ -165,46 +132,100 @@ async def aircraft_ws(websocket: WebSocket):
                 WHERE snapshot_time BETWEEN %s AND %s
                   AND lon BETWEEN %s AND %s
                   AND lat BETWEEN %s AND %s
-                ORDER BY snapshot_time ASC
-                """
+                ORDER BY icao, snapshot_time ASC
+            """, (
+                start_t,
+                end_t,
+                bounds["west"],
+                bounds["east"],
+                bounds["south"],
+                bounds["north"]
+            ))
 
-                cur.execute(query, (
-                    last_sent_end,
-                    chunk_end,
-                    west, east,
-                    south, north
-                ))
+            rows = cur.fetchall()
 
-                rows = cur.fetchall()
+            by_icao = {}
 
-                aircraft = [
-                    {
-                        "icao": r[0],
-                        "snapshot_time": r[1],
-                        "lat": r[2],
-                        "lon": r[3],
-                        "altitude_m": r[4],
-                        "velocity_mps": r[5],
-                        "heading_deg": r[6],
-                        "callsign": r[7],
-                        "origin_country": r[8],
-                    }
-                    for r in rows
-                ]
+            for r in rows:
+                icao = r[0]
 
-                await websocket.send_json({
-                    "type": "append",
-                    "start_time": last_sent_end,
-                    "end_time": chunk_end,
-                    "aircraft": aircraft
+                if icao not in by_icao:
+                    by_icao[icao] = []
+
+                by_icao[icao].append({
+                    "icao": r[0],
+                    "snapshot_time": r[1],
+                    "lat": r[2],
+                    "lon": r[3],
+                    "altitude_m": r[4],
+                    "velocity_mps": r[5],
+                    "heading_deg": r[6],
+                    "callsign": r[7],
+                    "origin_country": r[8],
                 })
 
-                last_sent_end = chunk_end
+            await websocket.send_json({
+                "type": label.lower(),
+                "start_time": start_t,
+                "end_time": end_t,
+                "snapshots": by_icao,
+            })
+
+            print(f"[AIRCRAFT WS] {label} -> aircraft={len(by_icao)} points={len(rows)}")
+
+            return len(rows)
+
+        async def streamer():
+
+            nonlocal bounds
+
+            print("[AIRCRAFT WS] streamer started")
+
+            while not bounds:
+                await asyncio.sleep(0.1)
+
+            cur.execute("""
+                SELECT MIN(snapshot_time), MAX(snapshot_time)
+                FROM adsb_playback
+            """)
+
+            first_time, max_time = cur.fetchone()
+
+            if first_time is None:
+                print("[AIRCRAFT WS] no data")
+                return
+
+            first_time = (first_time // 60) * 60
+
+            init_end = first_time + INIT_WINDOW_SECONDS
+
+            await send_chunk(first_time, init_end, "INIT")
+
+            last_time = init_end
+
+            while last_time < max_time:
+
+                # get next time slice boundary
+                cur.execute("""
+                    SELECT MIN(snapshot_time)
+                    FROM adsb_playback
+                    WHERE snapshot_time > %s
+                """, (last_time,))
+
+                next_time = cur.fetchone()[0]
+
+                if not next_time:
+                    break
+
+                await asyncio.sleep(max(0.5, next_time - last_time))
+
+                await send_chunk(last_time, next_time, "APPEND")
+
+                last_time = next_time
+
+            print("[AIRCRAFT WS] finished")
 
         await asyncio.gather(receiver(), streamer())
-
-    except WebSocketDisconnect:
-        print("[WS] disconnected")
 
     finally:
         if cur:
