@@ -55,7 +55,31 @@ TOOLS = [
             },
             "required": ["query", "camera_altitude_m"],
         },
-    }
+    },
+    {
+        "type": "function",
+        "name": "show_vessel_layer",
+        "description": (
+            "Enable the vessel/ship/boat AIS data layer."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+    },
+    {
+        "type": "function",
+        "name": "show_aircraft_layer",
+        "description": (
+            "Enable the aircraft/plane ADS-B data layer."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+    },
 ]
 
 
@@ -70,6 +94,8 @@ Your job is to convert user input into map actions.
 
 RULES:
 - If the user mentions ANY geographic location, use the center_map tool.
+- If the user mentions boats, ships, shipping, maritime traffic, vessels, AIS, etc., use show_vessel_layer.
+- If the user mentions planes, aircraft, flights, aviation, ADS-B, etc., use show_aircraft_layer.
 - You MUST estimate an appropriate camera_altitude_m based on the scale of the place:
     - small landmark / building: 500m - 5,000m
     - city: 20,000m - 150,000m
@@ -96,28 +122,49 @@ async def resolve_command(payload: CommandRequest) -> CommandResponse:
         tools=TOOLS,
     )
 
-    tool_call = next(
-        (item for item in response.output if item.type == "function_call"),
-        None
-    )
+    tool_calls = [
+        item
+        for item in response.output
+        if item.type == "function_call"
+    ]
 
-    if not tool_call:
-        return CommandResponse(action=None, args={})
+    if not tool_calls:
+        return CommandResponse(actions=[])
 
-    args = json.loads(tool_call.arguments)
-    query = args.get("query")
+    actions = []
 
-    geo = geocode(query)
+    for tool_call in tool_calls:
+        if tool_call.name == "show_vessel_layer":
+            actions.append({
+                "action": "show_vessel_layer",
+                "args": {}
+            })
 
-    if not geo:
-        return CommandResponse(action=None, args={})
+        elif tool_call.name == "show_aircraft_layer":
+            actions.append({
+                "action": "show_aircraft_layer",
+                "args": {}
+            })
 
-    return CommandResponse(
-        action="center_map",
-        args={
-            "query": query,
-            "lat": geo["lat"],
-            "lon": geo["lon"],
-            "camera_altitude_m": args.get("camera_altitude_m"),
-        },
-    )
+        elif tool_call.name == "center_map":
+            args = json.loads(tool_call.arguments)
+
+            query = args.get("query")
+            if not query:
+                continue
+
+            geo = geocode(query)
+            if not geo:
+                continue
+
+            actions.append({
+                "action": "center_map",
+                "args": {
+                    "query": query,
+                    "lat": geo["lat"],
+                    "lon": geo["lon"],
+                    "camera_altitude_m": args.get("camera_altitude_m"),
+                }
+            })
+
+    return CommandResponse(actions=actions)

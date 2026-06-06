@@ -11,5 +11,4 @@ class CommandRequest(BaseModel):
     prompt: str
 
 class CommandResponse(BaseModel):
-    action: Optional[str]
-    args: Dict[str, Any]
+    actions: list[dict]
