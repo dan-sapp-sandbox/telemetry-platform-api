@@ -101,9 +101,14 @@ async def aircraft_ws(websocket: WebSocket):
 
     conn = None
     cur = None
+
     bounds = None
+    first_time = None
+    last_time = None
 
     INIT_WINDOW_SECONDS = 120
+
+    db_lock = asyncio.Lock()
 
     try:
         conn = get_conn()
@@ -111,48 +116,44 @@ async def aircraft_ws(websocket: WebSocket):
 
         print("[AIRCRAFT WS] started")
 
-        async def receiver():
-            nonlocal bounds
-            while True:
-                bounds = await websocket.receive_json()
-
         async def send_chunk(start_t, end_t, label):
-            cur.execute("""
-                SELECT
-                    icao,
-                    snapshot_time,
-                    lat,
-                    lon,
-                    altitude_m,
-                    velocity_mps,
-                    heading_deg,
-                    callsign,
-                    origin_country
-                FROM adsb_playback
-                WHERE snapshot_time BETWEEN %s AND %s
-                  AND lon BETWEEN %s AND %s
-                  AND lat BETWEEN %s AND %s
-                ORDER BY icao, snapshot_time ASC
-            """, (
-                start_t,
-                end_t,
-                bounds["west"],
-                bounds["east"],
-                bounds["south"],
-                bounds["north"]
-            ))
+            nonlocal bounds
 
-            rows = cur.fetchall()
+            if not bounds:
+                return
+
+            async with db_lock:
+                cur.execute("""
+                    SELECT
+                        icao,
+                        snapshot_time,
+                        lat,
+                        lon,
+                        altitude_m,
+                        velocity_mps,
+                        heading_deg,
+                        callsign,
+                        origin_country
+                    FROM adsb_playback
+                    WHERE snapshot_time BETWEEN %s AND %s
+                      AND lon BETWEEN %s AND %s
+                      AND lat BETWEEN %s AND %s
+                    ORDER BY icao, snapshot_time ASC
+                """, (
+                    start_t,
+                    end_t,
+                    bounds["west"],
+                    bounds["east"],
+                    bounds["south"],
+                    bounds["north"]
+                ))
+
+                rows = cur.fetchall()
 
             by_icao = {}
 
             for r in rows:
-                icao = r[0]
-
-                if icao not in by_icao:
-                    by_icao[icao] = []
-
-                by_icao[icao].append({
+                by_icao.setdefault(r[0], []).append({
                     "icao": r[0],
                     "snapshot_time": r[1],
                     "lat": r[2],
@@ -171,25 +172,52 @@ async def aircraft_ws(websocket: WebSocket):
                 "snapshots": by_icao,
             })
 
-            print(f"[AIRCRAFT WS] {label} -> aircraft={len(by_icao)} points={len(rows)}")
+            print(
+                f"[AIRCRAFT WS] {label} "
+                f"aircraft={len(by_icao)} "
+                f"points={len(rows)} "
+                f"window={start_t}->{end_t}"
+            )
 
-            return len(rows)
+        async def receiver():
+            nonlocal bounds, first_time, last_time
+
+            first_bounds = True
+
+            while True:
+                new_bounds = await websocket.receive_json()
+                bounds = new_bounds
+
+                print("[AIRCRAFT WS] bounds update")
+
+                if first_bounds:
+                    first_bounds = False
+                    continue
+
+                if first_time is None or last_time is None:
+                    continue
+
+                await send_chunk(
+                    first_time,
+                    last_time,
+                    "BOUNDS_UPDATE"
+                )
 
         async def streamer():
-
-            nonlocal bounds
+            nonlocal bounds, first_time, last_time
 
             print("[AIRCRAFT WS] streamer started")
 
-            while not bounds:
-                await asyncio.sleep(0.1)
+            while bounds is None:
+                await asyncio.sleep(0.05)
 
-            cur.execute("""
-                SELECT MIN(snapshot_time), MAX(snapshot_time)
-                FROM adsb_playback
-            """)
+            async with db_lock:
+                cur.execute("""
+                    SELECT MIN(snapshot_time), MAX(snapshot_time)
+                    FROM adsb_playback
+                """)
 
-            first_time, max_time = cur.fetchone()
+                first_time, max_time = cur.fetchone()
 
             if first_time is None:
                 print("[AIRCRAFT WS] no data")
@@ -199,36 +227,50 @@ async def aircraft_ws(websocket: WebSocket):
 
             init_end = first_time + INIT_WINDOW_SECONDS
 
-            await send_chunk(first_time, init_end, "INIT")
+            await send_chunk(
+                first_time,
+                init_end,
+                "INIT"
+            )
 
             last_time = init_end
 
             while last_time < max_time:
 
-                # get next time slice boundary
-                cur.execute("""
-                    SELECT MIN(snapshot_time)
-                    FROM adsb_playback
-                    WHERE snapshot_time > %s
-                """, (last_time,))
+                async with db_lock:
+                    cur.execute("""
+                        SELECT MIN(snapshot_time)
+                        FROM adsb_playback
+                        WHERE snapshot_time > %s
+                    """, (last_time,))
 
-                next_time = cur.fetchone()[0]
+                    next_time = cur.fetchone()[0]
 
                 if not next_time:
                     break
 
-                await asyncio.sleep(max(0.5, next_time - last_time))
+                await asyncio.sleep(
+                    max(0.5, next_time - last_time)
+                )
 
-                await send_chunk(last_time, next_time, "APPEND")
+                await send_chunk(
+                    last_time,
+                    next_time,
+                    "APPEND"
+                )
 
                 last_time = next_time
 
             print("[AIRCRAFT WS] finished")
 
-        await asyncio.gather(receiver(), streamer())
+        await asyncio.gather(
+            receiver(),
+            streamer()
+        )
 
     finally:
         if cur:
             cur.close()
+
         if conn:
             conn.close()
