@@ -85,8 +85,13 @@ async def ais_ws(websocket: WebSocket):
 
     bounds = None
 
+    first_timestamp = None
+    last_sent_end = None
+
     CHUNK_MS = 30_000
     INIT_WINDOW_MS = 5 * 60 * 1000
+
+    db_lock = asyncio.Lock()
 
     try:
         conn = get_conn()
@@ -94,50 +99,46 @@ async def ais_ws(websocket: WebSocket):
 
         print("[AIS WS] started")
 
-        async def receiver():
-            nonlocal bounds
-
-            while True:
-                bounds = await websocket.receive_json()
-
         async def send_chunk(start_ms, end_ms, label):
+            if not bounds:
+                return
+
             west = bounds["west"]
             east = bounds["east"]
             south = bounds["south"]
             north = bounds["north"]
 
-            query = """
-            SELECT
-                mmsi,
-                timestamp_ms,
-                lat,
-                lon,
-                sog,
-                cog,
-                heading,
-                ship_name,
-                nav_status,
-                rot
-            FROM ais_position_reports
-            WHERE timestamp_ms BETWEEN %s AND %s
-              AND lon BETWEEN %s AND %s
-              AND lat BETWEEN %s AND %s
-            ORDER BY mmsi, timestamp_ms ASC
-            """
+            async with db_lock:
+                cur.execute(
+                    """
+                    SELECT
+                        mmsi,
+                        timestamp_ms,
+                        lat,
+                        lon,
+                        sog,
+                        cog,
+                        heading,
+                        ship_name,
+                        nav_status,
+                        rot
+                    FROM ais_position_reports
+                    WHERE timestamp_ms BETWEEN %s AND %s
+                      AND lon BETWEEN %s AND %s
+                      AND lat BETWEEN %s AND %s
+                    ORDER BY mmsi, timestamp_ms ASC
+                    """,
+                    (
+                        start_ms,
+                        end_ms,
+                        west,
+                        east,
+                        south,
+                        north,
+                    ),
+                )
 
-            cur.execute(
-                query,
-                (
-                    start_ms,
-                    end_ms,
-                    west,
-                    east,
-                    south,
-                    north,
-                ),
-            )
-
-            rows = cur.fetchall()
+                rows = cur.fetchall()
 
             by_mmsi = {}
 
@@ -177,20 +178,46 @@ async def ais_ws(websocket: WebSocket):
                 f"total_points={len(rows)}"
             )
 
+        async def receiver():
+            nonlocal bounds
+            nonlocal first_timestamp
+            nonlocal last_sent_end
+
+            first_bounds = True
+
+            while True:
+                bounds = await websocket.receive_json()
+
+                if first_bounds:
+                    first_bounds = False
+                    continue
+
+                if first_timestamp is None or last_sent_end is None:
+                    continue
+
+                await send_chunk(
+                    first_timestamp,
+                    last_sent_end,
+                    "BOUNDS_UPDATE",
+                )
+
         async def streamer():
             nonlocal bounds
+            nonlocal first_timestamp
+            nonlocal last_sent_end
 
-            while not bounds:
+            while bounds is None:
                 await asyncio.sleep(0.1)
 
-            cur.execute("""
-                SELECT
-                    MIN(timestamp_ms),
-                    MAX(timestamp_ms)
-                FROM ais_position_reports
-            """)
+            async with db_lock:
+                cur.execute("""
+                    SELECT
+                        MIN(timestamp_ms),
+                        MAX(timestamp_ms)
+                    FROM ais_position_reports
+                """)
 
-            first_timestamp, max_timestamp = cur.fetchone()
+                first_timestamp, max_timestamp = cur.fetchone()
 
             if first_timestamp is None:
                 print("[AIS WS] no AIS data")
